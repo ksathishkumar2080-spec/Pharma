@@ -4,12 +4,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from dashboard.routers import (
     hcps, trials, publications, scoring, triggers,
     search, territory, intelligence, semantic_search,
+    relationship, messages,
 )
 
 app = FastAPI(
     title="Oncology Intelligence OS",
     description="Internal intelligence platform for oncology commercial teams",
-    version="0.2.0",
+    version="0.3.0",
 )
 
 app.add_middleware(
@@ -28,16 +29,17 @@ app.include_router(search.router,           prefix="/api/search",           tags
 app.include_router(territory.router,        prefix="/api/territory",        tags=["Territory"])
 app.include_router(intelligence.router,     prefix="/api/intelligence",     tags=["Intelligence"])
 app.include_router(semantic_search.router,  prefix="/api/semantic",         tags=["Semantic Search"])
+app.include_router(relationship.router,     prefix="/api/relationship",     tags=["Relationship Memory"])
+app.include_router(messages.router,         prefix="/api/messages",         tags=["Messages"])
 
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "0.2.0"}
+    return {"status": "ok", "version": "0.3.0"}
 
 
 @app.get("/api/overview")
 async def overview():
-    """Executive dashboard summary."""
     from shared.db import get_engine
     from sqlalchemy import text
     async with get_engine().connect() as conn:

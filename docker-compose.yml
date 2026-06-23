@@ -12,6 +12,11 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-oncology}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   neo4j:
     image: neo4j:5
@@ -23,6 +28,11 @@ services:
       - '7687:7687'
     volumes:
       - neo4j_data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-O", "/dev/null", "http://localhost:7474"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
 
   elasticsearch:
     image: elasticsearch:8.13.0
@@ -34,69 +44,141 @@ services:
       - '9200:9200'
     volumes:
       - es_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9200/_cluster/health"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
 
   redis:
     image: redis:7-alpine
     ports:
       - '6379:6379'
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+
+  temporal:
+    image: temporalio/auto-setup:1.24
+    depends_on: [postgres]
+    environment:
+      - DB=postgresql
+      - DB_PORT=5432
+      - POSTGRES_USER=${POSTGRES_USER:-oncology}
+      - POSTGRES_PWD=${POSTGRES_PASSWORD:-changeme}
+      - POSTGRES_SEEDS=postgres
+    ports:
+      - '7233:7233'
+
+  temporal-ui:
+    image: temporalio/ui:2.26.2
+    depends_on: [temporal]
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+    ports:
+      - '8080:8080'
 
   ingestion:
     build: ./services/ingestion
     env_file: .env
-    depends_on: [postgres, redis, elasticsearch]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      elasticsearch: {condition: service_healthy}
     volumes:
       - ./shared:/app/shared
+    command: python -m ingestion.scheduler
 
   identity:
     build: ./services/identity
     env_file: .env
-    depends_on: [postgres, neo4j]
+    depends_on:
+      postgres: {condition: service_healthy}
+      neo4j: {condition: service_healthy}
     volumes:
       - ./shared:/app/shared
 
   graph:
     build: ./services/graph
     env_file: .env
-    depends_on: [neo4j, postgres]
+    depends_on:
+      neo4j: {condition: service_healthy}
+      postgres: {condition: service_healthy}
     volumes:
       - ./shared:/app/shared
 
   enrichment:
     build: ./services/enrichment
     env_file: .env
-    depends_on: [postgres, neo4j, redis]
+    depends_on:
+      postgres: {condition: service_healthy}
+      neo4j: {condition: service_healthy}
+      redis: {condition: service_healthy}
     volumes:
       - ./shared:/app/shared
 
   scoring:
     build: ./services/scoring
     env_file: .env
-    depends_on: [postgres, redis]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
     volumes:
       - ./shared:/app/shared
 
   triggers:
     build: ./services/triggers
     env_file: .env
-    depends_on: [postgres, redis, elasticsearch]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      elasticsearch: {condition: service_healthy}
     volumes:
       - ./shared:/app/shared
 
   messaging:
     build: ./services/messaging
     env_file: .env
-    depends_on: [postgres, redis]
+    ports:
+      - '8001:8001'
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
     volumes:
       - ./shared:/app/shared
+    command: uvicorn messaging.main:app --host 0.0.0.0 --port 8001
 
   dashboard:
     build: ./services/dashboard
     env_file: .env
     ports:
       - '8000:8000'
-    depends_on: [postgres, neo4j, elasticsearch, redis]
+    depends_on:
+      postgres: {condition: service_healthy}
+      neo4j: {condition: service_healthy}
+      elasticsearch: {condition: service_healthy}
+      redis: {condition: service_healthy}
     volumes:
       - ./shared:/app/shared
+      - ./services/scoring:/app/scoring
+
+  frontend:
+    build: ./frontend
+    ports:
+      - '3000:3000'
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    depends_on:
+      - dashboard
+
+  workflows:
+    build: ./services/ingestion
+    env_file: .env
+    depends_on: [temporal, postgres, neo4j, elasticsearch, redis]
+    volumes:
+      - ./shared:/app/shared
+      - ./services:/app/services
+    command: python services/workflows/temporal_workflows.py
 
 volumes:
   postgres_data:
