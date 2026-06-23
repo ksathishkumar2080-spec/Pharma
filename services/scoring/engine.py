@@ -5,82 +5,67 @@ import logging
 
 log = logging.getLogger(__name__)
 
-# Score weights
-WEIGHTS = {
-    "publication_count": 0.20,
-    "recent_publication_count": 0.15,
-    "trial_participation": 0.20,
-    "conference_presentations": 0.10,
-    "citation_count": 0.10,
-    "institution_rank": 0.10,
-    "digital_presence": 0.05,
-    "trigger_events": 0.10,
-}
-
 
 class ScoringEngine:
     async def score_all(self):
+        """Single-pass batch score update — no N+1 queries."""
         factory = get_session_factory()
         async with factory() as session:
-            hcps = (await session.execute(text("SELECT id FROM hcps"))).fetchall()
-
-        log.info("Scoring %d HCPs", len(hcps))
-        for (hcp_id,) in hcps:
-            scores = await self._compute(hcp_id)
-            await self._save(hcp_id, scores)
-
-    async def _compute(self, hcp_id) -> dict:
-        factory = get_session_factory()
-        async with factory() as session:
-            pub_count = (await session.execute(
-                text("SELECT COUNT(*) FROM publication_authors WHERE hcp_id = :id"),
-                {"id": hcp_id},
-            )).scalar() or 0
-
-            recent_pub_count = (await session.execute(
-                text("""
-                    SELECT COUNT(*) FROM publication_authors pa
+            result = await session.execute(text("""
+                WITH pub_counts AS (
+                    SELECT hcp_id, COUNT(*) AS total
+                    FROM publication_authors
+                    GROUP BY hcp_id
+                ),
+                recent_pub_counts AS (
+                    SELECT pa.hcp_id, COUNT(*) AS recent
+                    FROM publication_authors pa
                     JOIN publications p ON pa.publication_id = p.id
-                    WHERE pa.hcp_id = :id AND p.published_at >= NOW() - INTERVAL '2 years'
-                """),
-                {"id": hcp_id},
-            )).scalar() or 0
-
-            trial_count = (await session.execute(
-                text("SELECT COUNT(*) FROM trial_investigators WHERE hcp_id = :id"),
-                {"id": hcp_id},
-            )).scalar() or 0
-
-            trigger_count = (await session.execute(
-                text("SELECT COUNT(*) FROM trigger_events WHERE hcp_id = :id AND occurred_at >= NOW() - INTERVAL '6 months'"),
-                {"id": hcp_id},
-            )).scalar() or 0
-
-        raw_score = (
-            min(pub_count / 50, 1.0) * WEIGHTS["publication_count"]
-            + min(recent_pub_count / 10, 1.0) * WEIGHTS["recent_publication_count"]
-            + min(trial_count / 5, 1.0) * WEIGHTS["trial_participation"]
-            + min(trigger_count / 3, 1.0) * WEIGHTS["trigger_events"]
-        ) * 100
-
-        return {
-            "commercial_score": round(raw_score, 2),
-            "opportunity_score": round(raw_score * 0.9, 2),
-            "influence_score": round(min(pub_count / 20, 1.0) * 100, 2),
-        }
-
-    async def _save(self, hcp_id, scores: dict):
-        factory = get_session_factory()
-        async with factory() as session:
-            await session.execute(
-                text("""
-                    UPDATE hcps
-                    SET commercial_score = :commercial_score,
-                        opportunity_score = :opportunity_score,
-                        influence_score = :influence_score,
-                        updated_at = NOW()
-                    WHERE id = :id
-                """),
-                {**scores, "id": hcp_id},
-            )
+                    WHERE p.published_at >= NOW() - INTERVAL '2 years'
+                    GROUP BY pa.hcp_id
+                ),
+                trial_counts AS (
+                    SELECT hcp_id, COUNT(*) AS total
+                    FROM trial_investigators
+                    GROUP BY hcp_id
+                ),
+                trigger_counts AS (
+                    SELECT hcp_id, COUNT(*) AS recent
+                    FROM trigger_events
+                    WHERE occurred_at >= NOW() - INTERVAL '6 months'
+                    GROUP BY hcp_id
+                ),
+                scores AS (
+                    SELECT
+                        h.id,
+                        COALESCE(pc.total, 0)  AS pub_count,
+                        COALESCE(rp.recent, 0) AS recent_pub_count,
+                        COALESCE(tc.total, 0)  AS trial_count,
+                        COALESCE(tg.recent, 0) AS trigger_count
+                    FROM hcps h
+                    LEFT JOIN pub_counts pc ON h.id = pc.hcp_id
+                    LEFT JOIN recent_pub_counts rp ON h.id = rp.hcp_id
+                    LEFT JOIN trial_counts tc ON h.id = tc.hcp_id
+                    LEFT JOIN trigger_counts tg ON h.id = tg.hcp_id
+                )
+                UPDATE hcps h
+                SET
+                    commercial_score  = ROUND(CAST((
+                        LEAST(s.pub_count        / 50.0, 1.0) * 0.20 +
+                        LEAST(s.recent_pub_count / 10.0, 1.0) * 0.15 +
+                        LEAST(s.trial_count      /  5.0, 1.0) * 0.20 +
+                        LEAST(s.trigger_count    /  3.0, 1.0) * 0.10
+                    ) * 100 AS numeric), 2),
+                    opportunity_score = ROUND(CAST((
+                        LEAST(s.pub_count        / 50.0, 1.0) * 0.20 +
+                        LEAST(s.recent_pub_count / 10.0, 1.0) * 0.15 +
+                        LEAST(s.trial_count      /  5.0, 1.0) * 0.20 +
+                        LEAST(s.trigger_count    /  3.0, 1.0) * 0.10
+                    ) * 90 AS numeric), 2),
+                    influence_score   = ROUND(CAST(LEAST(s.pub_count / 20.0, 1.0) * 100 AS numeric), 2),
+                    updated_at        = NOW()
+                FROM scores s
+                WHERE h.id = s.id
+            """))
             await session.commit()
+            log.info("ScoringEngine: batch score update complete (rowcount=%s)", result.rowcount)
