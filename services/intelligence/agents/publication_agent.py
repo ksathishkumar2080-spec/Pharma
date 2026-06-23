@@ -1,4 +1,4 @@
-"""Publication Intelligence Agent.
+"""Publication Intelligence Agent — L5 Research Summarizer (citation & authorship layer).
 
 Provides:
 - Citation network analysis (who is citing whom)
@@ -7,8 +7,7 @@ Provides:
 - Publication gap detection (topics with few recent papers)
 - Author emergence scoring (rising new authors)
 """
-import anthropic
-import json
+from anthropic import AsyncAnthropic
 from shared.config import get_settings
 from shared.db import get_session_factory
 from sqlalchemy import text
@@ -19,11 +18,11 @@ log = logging.getLogger(__name__)
 
 class PublicationIntelligenceAgent:
     def __init__(self):
-        settings = get_settings()
-        self.client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        self._settings = get_settings()
+        self.client = AsyncAnthropic(api_key=self._settings.anthropic_api_key)
 
     async def citation_network(self, hcp_id: str) -> dict:
-        """Identify who cites this HCP's work and who they cite — influence map."""
+        """Identify co-author network and citation impact for an HCP."""
         factory = get_session_factory()
         async with factory() as session:
             hcp = (await session.execute(
@@ -39,9 +38,8 @@ class PublicationIntelligenceAgent:
                 WHERE pa.hcp_id = :id
                 ORDER BY p.citation_count DESC NULLS LAST
                 LIMIT 20
-            """), {"id": hcp_id})).fetchall()
+            """), {"id": hcp_id})).fetchall() or []
 
-            # Co-authors (2-hop network via shared publications)
             co_authors = (await session.execute(text("""
                 SELECT DISTINCT h2.id, h2.full_name, h2.specialty,
                        COUNT(*) AS shared_papers
@@ -53,14 +51,13 @@ class PublicationIntelligenceAgent:
                 GROUP BY h2.id, h2.full_name, h2.specialty
                 ORDER BY shared_papers DESC
                 LIMIT 15
-            """), {"id": hcp_id})).fetchall()
+            """), {"id": hcp_id})).fetchall() or []
 
-        total_citations = sum(p[2] or 0 for p in pubs)
         return {
             "hcp_id": hcp_id,
             "hcp_name": hcp[0],
             "publication_count": len(pubs),
-            "total_citations": total_citations,
+            "total_citations": sum(p[2] or 0 for p in pubs),
             "top_publications": [
                 {"pubmed_id": p[0], "title": p[1], "citations": p[2], "journal": p[3]}
                 for p in pubs
@@ -88,7 +85,7 @@ class PublicationIntelligenceAgent:
                 HAVING COUNT(*) >= 3
                 ORDER BY recent_papers DESC, avg_citations DESC
                 LIMIT :limit
-            """), {"limit": limit})).fetchall()
+            """), {"limit": limit})).fetchall() or []
         return [
             {
                 "journal": r[0],
@@ -130,7 +127,7 @@ class PublicationIntelligenceAgent:
                 )
                 ORDER BY recent_pubs DESC
                 LIMIT 30
-            """))).fetchall()
+            """))).fetchall() or []
 
         return [
             {
@@ -153,7 +150,7 @@ class PublicationIntelligenceAgent:
                 GROUP BY da
                 ORDER BY cnt
                 LIMIT 20
-            """))).fetchall()
+            """))).fetchall() or []
 
             biomarker_counts = (await session.execute(text("""
                 SELECT unnest(biomarkers) AS bm, COUNT(*) AS cnt
@@ -162,7 +159,7 @@ class PublicationIntelligenceAgent:
                 GROUP BY bm
                 ORDER BY cnt
                 LIMIT 20
-            """))).fetchall()
+            """))).fetchall() or []
 
         return {
             "underexplored_disease_areas": [
