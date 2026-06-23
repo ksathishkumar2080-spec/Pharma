@@ -1,16 +1,18 @@
-"""Executive Command Center — main FastAPI application."""
+"""Executive Command Center — main FastAPI application v0.4.0."""
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dashboard.routers import (
     hcps, trials, publications, scoring, triggers,
     search, territory, intelligence, semantic_search,
-    relationship, messages,
+    relationship, messages, system,
 )
 
 app = FastAPI(
     title="Oncology Intelligence OS",
     description="Internal intelligence platform for oncology commercial teams",
-    version="0.3.0",
+    version="0.4.0",
+    docs_url="/api/docs",
+    redoc_url="/api/redoc",
 )
 
 app.add_middleware(
@@ -31,11 +33,12 @@ app.include_router(intelligence.router,     prefix="/api/intelligence",     tags
 app.include_router(semantic_search.router,  prefix="/api/semantic",         tags=["Semantic Search"])
 app.include_router(relationship.router,     prefix="/api/relationship",     tags=["Relationship Memory"])
 app.include_router(messages.router,         prefix="/api/messages",         tags=["Messages"])
+app.include_router(system.router,           prefix="/api/system",           tags=["System"])
 
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "0.3.0"}
+    return {"status": "ok", "version": "0.4.0"}
 
 
 @app.get("/api/overview")
