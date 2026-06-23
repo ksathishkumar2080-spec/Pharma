@@ -1,0 +1,12 @@
+{
+  "mappings": {
+    "properties": {
+      "source": { "type": "keyword" },
+      "title": { "type": "text", "analyzer": "standard", "fields": { "keyword": { "type": "keyword" } } },
+      "abstract": { "type": "text", "analyzer": "standard" },
+      "authors": { "type": "text" },
+      "url": { "type": "keyword", "index": false },
+      "id": { "type": "keyword" }
+    }
+  }
+}

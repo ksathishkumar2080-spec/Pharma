@@ -1,0 +1,19 @@
+{
+  "mappings": {
+    "properties": {
+      "pub_id": { "type": "keyword" },
+      "doi": { "type": "keyword" },
+      "title": { "type": "text", "analyzer": "standard" },
+      "body": { "type": "text", "analyzer": "standard" },
+      "keywords": { "type": "keyword" },
+      "source": { "type": "keyword" },
+      "sections": {
+        "type": "nested",
+        "properties": {
+          "title": { "type": "keyword" },
+          "text": { "type": "text", "analyzer": "standard" }
+        }
+      }
+    }
+  }
+}

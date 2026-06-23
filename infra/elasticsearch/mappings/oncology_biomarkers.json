@@ -1,0 +1,13 @@
+{
+  "mappings": {
+    "properties": {
+      "gene": { "type": "keyword" },
+      "variant_id": { "type": "keyword" },
+      "title": { "type": "text", "analyzer": "standard" },
+      "clinical_significance": { "type": "keyword" },
+      "conditions": { "type": "text", "fields": { "keyword": { "type": "keyword" } } },
+      "review_status": { "type": "keyword" },
+      "last_evaluated": { "type": "date", "format": "yyyy-MM-dd||yyyy||epoch_millis" }
+    }
+  }
+}

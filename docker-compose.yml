@@ -1,0 +1,239 @@
+version: '3.9'
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-oncology_intel}
+      POSTGRES_USER: ${POSTGRES_USER:-oncology}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./infra/postgres/migrations:/docker-entrypoint-initdb.d/migrations
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-oncology}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  neo4j:
+    image: neo4j:5
+    environment:
+      NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-changeme}
+      NEO4J_PLUGINS: '["apoc", "graph-data-science"]'
+    ports:
+      - '7474:7474'
+      - '7687:7687'
+    volumes:
+      - neo4j_data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-O", "/dev/null", "http://localhost:7474"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  elasticsearch:
+    image: elasticsearch:8.13.0
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    ports:
+      - '9200:9200'
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9200/_cluster/health"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - '6379:6379'
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  temporal:
+    image: temporalio/auto-setup:1.24
+    depends_on:
+      postgres: {condition: service_healthy}
+    environment:
+      - DB=postgresql
+      - DB_PORT=5432
+      - POSTGRES_USER=${POSTGRES_USER:-oncology}
+      - POSTGRES_PWD=${POSTGRES_PASSWORD:-changeme}
+      - POSTGRES_SEEDS=postgres
+    ports:
+      - '7233:7233'
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health"]
+      interval: 15s
+      timeout: 10s
+      retries: 8
+      start_period: 30s
+
+  temporal-ui:
+    image: temporalio/ui:2.26.2
+    depends_on:
+      temporal: {condition: service_healthy}
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+    ports:
+      - '8080:8080'
+
+  ingestion:
+    build: ./services/ingestion
+    env_file: .env
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      elasticsearch: {condition: service_healthy}
+    volumes:
+      - ./shared:/app/shared
+    command: python -m ingestion.scheduler
+
+  identity:
+    build: ./services/identity
+    env_file: .env
+    depends_on:
+      postgres: {condition: service_healthy}
+      neo4j: {condition: service_healthy}
+    volumes:
+      - ./shared:/app/shared
+
+  graph:
+    build: ./services/graph
+    env_file: .env
+    depends_on:
+      neo4j: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+    volumes:
+      - ./shared:/app/shared
+
+  enrichment:
+    build: ./services/enrichment
+    env_file: .env
+    depends_on:
+      postgres: {condition: service_healthy}
+      neo4j: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    volumes:
+      - ./shared:/app/shared
+
+  scoring:
+    build: ./services/scoring
+    env_file: .env
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    volumes:
+      - ./shared:/app/shared
+
+  triggers:
+    build: ./services/triggers
+    env_file: .env
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      elasticsearch: {condition: service_healthy}
+    volumes:
+      - ./shared:/app/shared
+
+  messaging:
+    build: ./services/messaging
+    env_file: .env
+    ports:
+      - '8001:8001'
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    volumes:
+      - ./shared:/app/shared
+    command: uvicorn messaging.main:app --host 0.0.0.0 --port 8001
+
+  intelligence:
+    build:
+      context: .
+      dockerfile: services/intelligence/Dockerfile
+    env_file: .env
+    ports:
+      - '8002:8002'
+    depends_on:
+      postgres: {condition: service_healthy}
+      neo4j: {condition: service_healthy}
+      elasticsearch: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    volumes:
+      - ./shared:/app/shared
+    command: uvicorn services.intelligence.main:app --host 0.0.0.0 --port 8002
+
+  analytics:
+    build:
+      context: .
+      dockerfile: services/analytics/Dockerfile
+    env_file: .env
+    ports:
+      - '8003:8003'
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    volumes:
+      - ./shared:/app/shared
+    command: uvicorn services.analytics.main:app --host 0.0.0.0 --port 8003
+
+  dashboard:
+    build: ./services/dashboard
+    env_file: .env
+    ports:
+      - '8000:8000'
+    depends_on:
+      postgres: {condition: service_healthy}
+      neo4j: {condition: service_healthy}
+      elasticsearch: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      intelligence: {condition: service_started}
+      analytics: {condition: service_started}
+    volumes:
+      - ./shared:/app/shared
+      - ./services/scoring:/app/scoring
+    environment:
+      - INTELLIGENCE_SERVICE_URL=http://intelligence:8002
+      - ANALYTICS_SERVICE_URL=http://analytics:8003
+
+  frontend:
+    build: ./frontend
+    ports:
+      - '3000:3000'
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NEXT_PUBLIC_INTELLIGENCE_URL=http://localhost:8002
+      - NEXT_PUBLIC_ANALYTICS_URL=http://localhost:8003
+    depends_on:
+      - dashboard
+
+  workflows:
+    build: ./services/ingestion
+    env_file: .env
+    depends_on:
+      temporal: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+      neo4j: {condition: service_healthy}
+      elasticsearch: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    volumes:
+      - ./shared:/app/shared
+      - ./services:/app/services
+    command: python services/workflows/temporal_workflows.py
+
+volumes:
+  postgres_data:
+  neo4j_data:
+  es_data:
