@@ -1,17 +1,11 @@
 """Executive Insights Agent — L18 Executive Command Center.
 
-Synthesizes a full-stack view across ALL pipeline layers for executive users
-(Medical Affairs leadership, Commercial VP, Executive Portal).
-
-Aggregates:
-- Pipeline health: ingestion rates, enrichment coverage, trigger velocity
-- Territory snapshot: top opportunity HCPs by region, tier distribution
-- Messaging performance: conversion rates, reply rates, channel effectiveness
-- Research landscape: emerging themes, competitor moves, hot biomarkers
-- Compliance posture: audit log summary, citation validation rates
-- Decision support: top 5 actions leadership should take this week
-
-Used by the Executive Command Center dashboard (L18) and the Leadership portal.
+Synthesises the full pipeline into C-suite briefings:
+- Weekly territory KPI snapshot
+- Top opportunity HCPs with scoring rationale
+- Competitive threat summary
+- Pipeline / trial advancement highlights
+- Recommended commercial priorities
 """
 from anthropic import AsyncAnthropic
 import json
@@ -19,185 +13,170 @@ from shared.config import get_settings
 from shared.db import get_session_factory
 from sqlalchemy import text
 import logging
-from datetime import datetime
 
 log = logging.getLogger(__name__)
 
 EXECUTIVE_BRIEFING_PROMPT = """
-You are the chief intelligence officer for an oncology commercial team.
-Synthesize the metrics below into an executive briefing for the VP of Commercial and Medical Affairs.
+You are the Chief Commercial Intelligence Officer for an oncology biotech.
 
-PIPELINE HEALTH:
-- Total HCPs tracked: {total_hcps} ({active_hcps} active)
-- Publications ingested (last 30d): {new_pubs}
-- Recruiting trials monitored: {recruiting_trials}
-- Trigger events (last 7d): {recent_triggers}
+Current KPI Snapshot:
+{kpis}
 
-TERRITORY SNAPSHOT:
-- National KOLs: {national_kols} | Regional: {regional_kols} | Local/Emerging: {local_kols}
-- States with highest opportunity: {top_states}
-- Average commercial score: {avg_score}
+Top Opportunity HCPs (scored):
+{top_hcps}
 
-MESSAGING PERFORMANCE (last 30d):
-- Messages sent: {messages_sent}
-- Open rate: {open_rate}%
-- Reply rate: {reply_rate}%
-- Best channel: {best_channel}
+Recent Competitive Events:
+{competitive_events}
 
-RESEARCH SIGNALS:
-- Top biomarkers trending: {hot_biomarkers}
-- Competitor publications (last 30d): {competitor_pubs}
+Recent Trial Activations:
+{trial_activations}
 
-Produce JSON with keys:
-  executive_summary: 3-4 sentence strategic narrative
-  pipeline_health_score: integer 0-100
-  top_opportunities: list of 5 {{hcp_name, tier, state, reason}} — highest-priority HCPs
-  strategic_risks: list of up to 3 risks with brief description
-  recommended_decisions: list of 5 executive actions for this week
-  kpis: {{total_hcps, coverage_rate, message_reply_rate, trigger_velocity, pipeline_health_score}}
-  generated_at: current ISO timestamp
+Pending Message Pipeline:
+{message_pipeline}
+
+Produce a concise JSON executive briefing with keys:
+  headline: one sentence summarising the week
+  commercial_priority: top 3 actions ranked by expected revenue impact
+  risk_flags: up to 2 items that need immediate attention
+  kol_momentum: brief note on KOL engagement trajectory
+  competitive_watch: most important competitive development this week
+  recommended_ceo_actions: list of 2 specific decisions needed from leadership
 """
 
 
 class ExecutiveInsightsAgent:
-    """L18 — full-stack synthesis for the Executive Command Center."""
-
     def __init__(self):
-        self._settings = get_settings()
-        self.client = AsyncAnthropic(api_key=self._settings.anthropic_api_key)
+        settings = get_settings()
+        self.client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+        self.model = settings.anthropic_model_sonnet
 
     async def generate_briefing(self) -> dict:
-        """Generate a complete executive briefing from live data."""
-        metrics = await self._gather_metrics()
-        top_hcps = await self._get_top_opportunity_hcps()
-        prompt = EXECUTIVE_BRIEFING_PROMPT.format(**metrics)
-
-        response = await self.client.messages.create(
-            model=self._settings.anthropic_model_sonnet,
-            max_tokens=2048,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        raw = response.content[0].text
-        try:
-            briefing = json.loads(raw)
-        except json.JSONDecodeError:
-            stripped = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-            try:
-                briefing = json.loads(stripped)
-            except Exception:
-                briefing = {"executive_summary": raw}
-
-        briefing["top_opportunity_hcps_detail"] = top_hcps
-        briefing["generated_at"] = datetime.utcnow().isoformat() + "Z"
-        briefing["raw_metrics"] = metrics
-        return briefing
-
-    async def kpi_snapshot(self) -> dict:
-        """Fast KPI snapshot without LLM — for dashboard widgets."""
-        return await self._gather_metrics()
-
-    async def _gather_metrics(self) -> dict:
+        kpis = await self.kpi_snapshot()
         factory = get_session_factory()
+
         async with factory() as session:
-            total_hcps = (await session.execute(text("SELECT COUNT(*) FROM hcps"))).scalar() or 0
-            active_hcps = (await session.execute(text("SELECT COUNT(*) FROM hcps WHERE is_active = TRUE"))).scalar() or 0
-
-            new_pubs = (await session.execute(text(
-                "SELECT COUNT(*) FROM publications WHERE created_at >= NOW() - INTERVAL '30 days'"
-            ))).scalar() or 0
-
-            recruiting_trials = (await session.execute(text(
-                "SELECT COUNT(*) FROM clinical_trials WHERE status = 'RECRUITING'"
-            ))).scalar() or 0
-
-            recent_triggers = (await session.execute(text(
-                "SELECT COUNT(*) FROM trigger_events WHERE occurred_at >= NOW() - INTERVAL '7 days'"
-            ))).scalar() or 0
-
-            national_kols = (await session.execute(text(
-                "SELECT COUNT(*) FROM hcps WHERE kol_tier = 'national'"
-            ))).scalar() or 0
-            regional_kols = (await session.execute(text(
-                "SELECT COUNT(*) FROM hcps WHERE kol_tier = 'regional'"
-            ))).scalar() or 0
-            local_kols = (await session.execute(text(
-                "SELECT COUNT(*) FROM hcps WHERE kol_tier IN ('local', 'emerging')"
-            ))).scalar() or 0
-
-            top_states_rows = (await session.execute(text("""
-                SELECT state, COUNT(*) AS cnt, AVG(commercial_score) AS avg_score
-                FROM hcps WHERE is_active = TRUE AND state IS NOT NULL
-                GROUP BY state ORDER BY avg_score DESC LIMIT 5
+            comp_rows = (await session.execute(text("""
+                SELECT event_data, occurred_at
+                FROM trigger_events
+                WHERE event_type = 'competitor_drug_approved'
+                ORDER BY occurred_at DESC LIMIT 5
             """))).fetchall() or []
 
-            avg_score = (await session.execute(text(
-                "SELECT AVG(commercial_score) FROM hcps WHERE is_active = TRUE"
-            ))).scalar() or 0
+            trial_rows = (await session.execute(text("""
+                SELECT title, phase, sponsor, created_at
+                FROM clinical_trials
+                WHERE status = 'RECRUITING'
+                AND created_at >= NOW() - INTERVAL '30 days'
+                ORDER BY created_at DESC LIMIT 5
+            """))).fetchall() or []
 
-            messages_sent = (await session.execute(text(
-                "SELECT COUNT(*) FROM outreach_messages WHERE sent_at >= NOW() - INTERVAL '30 days'"
-            ))).scalar() or 0
-
-            opened = (await session.execute(text(
-                "SELECT COUNT(*) FROM outreach_messages WHERE opened_at IS NOT NULL AND sent_at >= NOW() - INTERVAL '30 days'"
-            ))).scalar() or 0
-
-            replied = (await session.execute(text(
-                "SELECT COUNT(*) FROM outreach_messages WHERE replied_at IS NOT NULL AND sent_at >= NOW() - INTERVAL '30 days'"
-            ))).scalar() or 0
-
-            best_channel_row = (await session.execute(text("""
-                SELECT channel, COUNT(*) AS cnt
-                FROM outreach_messages
-                WHERE replied_at IS NOT NULL AND sent_at >= NOW() - INTERVAL '30 days'
-                GROUP BY channel ORDER BY cnt DESC LIMIT 1
+            msg_rows = (await session.execute(text("""
+                SELECT COUNT(*) FILTER (WHERE status = 'pending') AS pending,
+                       COUNT(*) FILTER (WHERE status = 'sent')    AS sent,
+                       COUNT(*) FILTER (WHERE status = 'approved') AS approved
+                FROM messages
             """))).fetchone()
 
-            biomarker_rows = (await session.execute(text("""
-                SELECT unnest(biomarkers) AS bm, COUNT(*) AS cnt
-                FROM publications
-                WHERE published_at >= NOW() - INTERVAL '30 days'
-                GROUP BY bm ORDER BY cnt DESC LIMIT 5
-            """))).fetchall() or []
+        top_hcps = await self._get_top_opportunity_hcps()
 
-            competitor_pubs = (await session.execute(text(
-                "SELECT COUNT(*) FROM publications WHERE created_at >= NOW() - INTERVAL '30 days'"
-            ))).scalar() or 0
+        prompt = EXECUTIVE_BRIEFING_PROMPT.format(
+            kpis=json.dumps(kpis, default=str),
+            top_hcps="\n".join(
+                f"- {h['name']} ({h['specialty']}, {h['state']}): score {h['commercial_score']}"
+                for h in top_hcps
+            ) or "No scored HCPs yet",
+            competitive_events="\n".join(
+                str(r[0]) for r in comp_rows
+            ) or "None this period",
+            trial_activations="\n".join(
+                f"- {r[0]} | Phase {r[1]} | {r[2]}"
+                for r in trial_rows
+            ) or "None this period",
+            message_pipeline=(
+                f"Pending: {msg_rows[0]}, Sent: {msg_rows[1]}, Approved: {msg_rows[2]}"
+                if msg_rows else "No data"
+            ),
+        )
 
-        open_rate = round(opened / max(messages_sent, 1) * 100, 1)
-        reply_rate = round(replied / max(messages_sent, 1) * 100, 1)
+        response = await self.client.messages.create(
+            model=self.model,
+            max_tokens=1024,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        try:
+            analysis = json.loads(response.content[0].text)
+        except Exception:
+            analysis = {"summary": response.content[0].text}
 
         return {
-            "total_hcps": total_hcps,
-            "active_hcps": active_hcps,
-            "new_pubs": new_pubs,
-            "recruiting_trials": recruiting_trials,
-            "recent_triggers": recent_triggers,
-            "national_kols": national_kols,
-            "regional_kols": regional_kols,
-            "local_kols": local_kols,
-            "top_states": ", ".join(f"{r[0]} (avg score {r[2]:.0f})" for r in top_states_rows) or "N/A",
-            "avg_score": round(avg_score, 1),
-            "messages_sent": messages_sent,
-            "open_rate": open_rate,
-            "reply_rate": reply_rate,
-            "best_channel": best_channel_row[0] if best_channel_row else "N/A",
-            "hot_biomarkers": ", ".join(r[0] for r in biomarker_rows) or "None detected",
-            "competitor_pubs": competitor_pubs,
+            "kpis": kpis,
+            "top_opportunities": top_hcps,
+            "analysis": analysis,
+        }
+
+    async def kpi_snapshot(self) -> dict:
+        factory = get_session_factory()
+        async with factory() as session:
+            hcp_row = (await session.execute(text("""
+                SELECT COUNT(*) AS total,
+                       COUNT(*) FILTER (WHERE kol_tier IN ('KOL', 'Regional KOL')) AS kols,
+                       AVG(commercial_score) AS avg_score
+                FROM hcps WHERE is_active = TRUE
+            """))).fetchone()
+
+            msg_row = (await session.execute(text("""
+                SELECT COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days') AS this_week,
+                       COUNT(*) FILTER (WHERE status = 'pending') AS pending
+                FROM messages
+            """))).fetchone()
+
+            trigger_row = (await session.execute(text("""
+                SELECT COUNT(*) FROM trigger_events
+                WHERE occurred_at >= NOW() - INTERVAL '7 days'
+            """))).fetchone()
+
+            trial_row = (await session.execute(text("""
+                SELECT COUNT(*) FROM clinical_trials WHERE status = 'RECRUITING'
+            """))).fetchone()
+
+            top_states_rows = (await session.execute(text("""
+                SELECT state, COUNT(*) AS hcp_count, AVG(commercial_score) AS avg_score
+                FROM hcps WHERE is_active = TRUE AND state IS NOT NULL
+                GROUP BY state ORDER BY hcp_count DESC LIMIT 5
+            """))).fetchall() or []
+
+        return {
+            "active_hcps": hcp_row[0] if hcp_row else 0,
+            "kol_count": hcp_row[1] if hcp_row else 0,
+            "avg_commercial_score": round(float(hcp_row[2] or 0), 1) if hcp_row else 0,
+            "messages_this_week": msg_row[0] if msg_row else 0,
+            "messages_pending": msg_row[1] if msg_row else 0,
+            "triggers_this_week": trigger_row[0] if trigger_row else 0,
+            "active_recruiting_trials": trial_row[0] if trial_row else 0,
+            "top_states": [
+                {
+                    "state": r[0],
+                    "hcp_count": r[1],
+                    "avg_score": f"{float(r[2] or 0):.0f}",
+                }
+                for r in top_states_rows
+            ],
         }
 
     async def _get_top_opportunity_hcps(self, limit: int = 10) -> list[dict]:
         factory = get_session_factory()
         async with factory() as session:
             rows = (await session.execute(text("""
-                SELECT h.id, h.full_name, h.specialty, h.kol_tier, h.state,
-                       h.commercial_score,
-                       COUNT(te.id) FILTER (WHERE te.occurred_at >= NOW() - INTERVAL '30 days') AS recent_triggers
+                SELECT h.id, h.full_name, h.specialty, h.state,
+                       h.commercial_score, h.kol_tier,
+                       COUNT(DISTINCT te.id) AS recent_triggers
                 FROM hcps h
                 LEFT JOIN trigger_events te ON te.hcp_id = h.id
+                    AND te.occurred_at >= NOW() - INTERVAL '30 days'
                 WHERE h.is_active = TRUE
-                GROUP BY h.id, h.full_name, h.specialty, h.kol_tier, h.state, h.commercial_score
-                ORDER BY h.commercial_score DESC, recent_triggers DESC
+                GROUP BY h.id, h.full_name, h.specialty, h.state,
+                         h.commercial_score, h.kol_tier
+                ORDER BY h.commercial_score DESC NULLS LAST
                 LIMIT :limit
             """), {"limit": limit})).fetchall() or []
 
@@ -206,9 +185,9 @@ class ExecutiveInsightsAgent:
                 "hcp_id": str(r[0]),
                 "name": r[1],
                 "specialty": r[2],
-                "tier": r[3],
-                "state": r[4],
-                "commercial_score": r[5],
+                "state": r[3],
+                "commercial_score": float(r[4] or 0),
+                "kol_tier": r[5],
                 "recent_triggers": r[6],
             }
             for r in rows

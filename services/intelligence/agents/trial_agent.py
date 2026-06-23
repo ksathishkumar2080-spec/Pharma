@@ -9,7 +9,7 @@ Provides:
 """
 from shared.db import get_session_factory
 from sqlalchemy import text
-import anthropic
+from anthropic import AsyncAnthropic
 import json
 from shared.config import get_settings
 import logging
@@ -35,7 +35,7 @@ Provide JSON with keys:
 class ClinicalTrialIntelligenceAgent:
     def __init__(self):
         settings = get_settings()
-        self.client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        self.client = AsyncAnthropic(api_key=settings.anthropic_api_key)
 
     async def competitive_landscape(self, disease_area: str) -> dict:
         factory = get_session_factory()
@@ -63,7 +63,7 @@ class ClinicalTrialIntelligenceAgent:
             for r in rows
         )
         prompt = TRIAL_LANDSCAPE_PROMPT.format(disease_area=disease_area, trials=trial_text)
-        response = self.client.messages.create(
+        response = await self.client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=1024,
             messages=[{"role": "user", "content": prompt}],

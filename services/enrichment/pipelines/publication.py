@@ -1,6 +1,6 @@
 """Enriches publications with disease areas, biomarkers, and therapies using Claude."""
 import json
-import anthropic
+from anthropic import AsyncAnthropic
 from shared.config import get_settings
 from shared.db import get_session_factory
 from sqlalchemy import text
@@ -20,7 +20,7 @@ Abstract:
 class PublicationEnrichmentPipeline:
     def __init__(self):
         settings = get_settings()
-        self.client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        self.client = AsyncAnthropic(api_key=settings.anthropic_api_key)
 
     async def run(self):
         factory = get_session_factory()
@@ -40,8 +40,8 @@ class PublicationEnrichmentPipeline:
 
     async def _enrich(self, pub_id, abstract: str):
         try:
-            response = self.client.messages.create(
-                model="claude-sonnet-4-6",
+            response = await self.client.messages.create(
+                model="claude-haiku-4-5-20251001",
                 max_tokens=512,
                 messages=[{"role": "user", "content": EXTRACTION_PROMPT.format(abstract=abstract)}],
             )

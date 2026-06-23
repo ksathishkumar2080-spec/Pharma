@@ -7,15 +7,19 @@ Provides:
 - HCP competitor affinity alerts
 - Market share signal detection from trial volumes
 """
-import anthropic
+from anthropic import AsyncAnthropic
 import json
 from shared.config import get_settings
 from shared.db import get_session_factory
-from elasticsearch import AsyncElasticsearch
 from sqlalchemy import text
 import logging
 
 log = logging.getLogger(__name__)
+
+try:
+    from elasticsearch import AsyncElasticsearch
+except ImportError:
+    AsyncElasticsearch = None
 
 COMPETITOR_BRIEF_PROMPT = """
 You are an oncology competitive intelligence analyst.
@@ -46,7 +50,7 @@ Produce JSON with keys:
 class CompetitorIntelligenceAgent:
     def __init__(self):
         settings = get_settings()
-        self.client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        self.client = AsyncAnthropic(api_key=settings.anthropic_api_key)
 
     async def get_competitor_brief(self, company_name: str) -> dict:
         factory = get_session_factory()
@@ -67,25 +71,30 @@ class CompetitorIntelligenceAgent:
 
         # Search news for company mentions
         news_snippets = []
-        try:
-            es = AsyncElasticsearch(settings.elasticsearch_url)
-            result = await es.search(
-                index="oncology_news",
-                body={"query": {"match": {"content": company_name}}, "size": 5},
-            )
-            news_snippets = [
-                h["_source"].get("content", "")[:300]
-                for h in result["hits"]["hits"]
-            ]
-            await es.close()
-        except Exception:
-            pass
+        if AsyncElasticsearch is not None:
+            try:
+                es = AsyncElasticsearch(settings.elasticsearch_url)
+                result = await es.search(
+                    index="oncology_news",
+                    body={"query": {"match": {"content": company_name}}, "size": 5},
+                )
+                news_snippets = [
+                    h["_source"].get("content", "")[:300]
+                    for h in result["hits"]["hits"]
+                ]
+                await es.close()
+            except Exception:
+                pass
 
         # HCPs with high competitor affinity
-        from scoring.competitor_affinity import CompetitorAffinityScorer
-        scorer = CompetitorAffinityScorer()
-        hcp_affinities = await scorer.score_all([company_name])
-        top_hcps = hcp_affinities[:5]
+        top_hcps: list = []
+        try:
+            from scoring.competitor_affinity import CompetitorAffinityScorer
+            scorer = CompetitorAffinityScorer()
+            hcp_affinities = await scorer.score_all([company_name])
+            top_hcps = hcp_affinities[:5]
+        except ImportError:
+            log.warning("CompetitorAffinityScorer not available; skipping HCP affinity signals")
 
         prompt = COMPETITOR_BRIEF_PROMPT.format(
             company=company_name,
@@ -98,7 +107,7 @@ class CompetitorIntelligenceAgent:
             ) or "None detected",
         )
 
-        response = self.client.messages.create(
+        response = await self.client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=1024,
             messages=[{"role": "user", "content": prompt}],

@@ -1,89 +1,87 @@
-"""Wiley grammar and style validator for outreach messages."""
-import httpx
-import logging
+"""Grammar and tone validation for outbound HCP messages."""
+from anthropic import AsyncAnthropic
 from shared.config import get_settings
+from shared.db import get_session_factory
+from sqlalchemy import text
+import logging
+import json
 
 log = logging.getLogger(__name__)
 
-WILEY_PROOFING_URL = "https://api.wiley.com/onlinelibrary/tdm/v1/proofing"
+GRAMMAR_CHECK_PROMPT = """
+You are a medical communications editor reviewing an oncology sales message.
+
+Message:
+{message}
+
+Return JSON with keys:
+  grammar_ok: bool
+  tone_ok: bool (professional, empathetic, evidence-based)
+  issues: list of specific issues found
+  revised_message: corrected version (or original if no changes needed)
+  compliance_notes: any pharma compliance concerns
+"""
 
 
-class WileyGrammarValidator:
-    """Validates message grammar, tone, and scientific accuracy via Wiley API."""
-
+class GrammarValidator:
     def __init__(self):
-        self.settings = get_settings()
+        settings = get_settings()
+        self.client = AsyncAnthropic(api_key=settings.anthropic_api_key)
 
-    async def validate(self, text: str) -> dict:
-        """
-        Returns:
-            {
-                valid: bool,
-                issues: [{offset, length, message, suggestion}],
-                corrected: str | None
-            }
-        """
-        if not self.settings.wiley_api_key:
-            log.warning("Wiley API key not configured — skipping grammar validation")
-            return {"valid": True, "issues": [], "corrected": None}
+    async def validate(self, message_id: str) -> dict:
+        factory = get_session_factory()
+        async with factory() as session:
+            row = (await session.execute(
+                text("SELECT content, hcp_id FROM messages WHERE id = :id"),
+                {"id": message_id},
+            )).fetchone()
 
-        try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.post(
-                    WILEY_PROOFING_URL,
-                    headers={
-                        "Authorization": f"Bearer {self.settings.wiley_api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={"text": text, "language": "en-US", "domain": "medical"},
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    issues = data.get("matches", [])
-                    corrected = self._apply_corrections(text, issues)
-                    return {
-                        "valid": len(issues) == 0,
-                        "issues": issues,
-                        "corrected": corrected if issues else None,
-                    }
-        except Exception as e:
-            log.error("Wiley validation error: %s", e)
+        if not row:
+            return {"error": "Message not found"}
 
-        # Fallback: Claude-based grammar check
-        return await self._claude_grammar_check(text)
+        result = await self._claude_grammar_check(row[0])
 
-    async def _claude_grammar_check(self, text: str) -> dict:
-        """Fallback grammar validation using Claude."""
-        import anthropic
-        import json
-        client = anthropic.Anthropic(api_key=self.settings.anthropic_api_key)
-        response = client.messages.create(
+        factory = get_session_factory()
+        async with factory() as session:
+            await session.execute(
+                text("""
+                    UPDATE messages
+                    SET grammar_checked = TRUE,
+                        grammar_issues = :issues,
+                        revised_content = :revised
+                    WHERE id = :id
+                """),
+                {
+                    "issues": result.get("issues", []),
+                    "revised": result.get("revised_message", row[0]),
+                    "id": message_id,
+                },
+            )
+            await session.commit()
+
+        return result
+
+    async def _claude_grammar_check(self, message_text: str) -> dict:
+        response = await self.client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=512,
-            messages=[{
-                "role": "user",
-                "content": (
-                    "Review this medical outreach message for grammar, professional tone, "
-                    "and factual clarity. Return JSON with keys: valid (bool), "
-                    "issues (list of strings), corrected (string with corrections applied).\n\n"
-                    f"Message:\n{text}"
-                ),
-            }],
+            messages=[{"role": "user", "content": GRAMMAR_CHECK_PROMPT.format(message=message_text)}],
         )
         try:
             return json.loads(response.content[0].text)
         except Exception:
-            return {"valid": True, "issues": [], "corrected": None}
+            return {"grammar_ok": True, "tone_ok": True, "issues": [], "revised_message": message_text}
 
-    def _apply_corrections(self, text: str, issues: list) -> str:
-        """Apply Wiley-suggested corrections to the original text."""
-        corrected = text
-        offset_shift = 0
-        for issue in sorted(issues, key=lambda x: x.get("offset", 0)):
-            offset = issue.get("offset", 0) + offset_shift
-            length = issue.get("length", 0)
-            replacement = issue.get("replacements", [{}])[0].get("value", "")
-            if replacement:
-                corrected = corrected[:offset] + replacement + corrected[offset + length:]
-                offset_shift += len(replacement) - length
-        return corrected
+    async def batch_validate_pending(self) -> list[dict]:
+        factory = get_session_factory()
+        async with factory() as session:
+            rows = (await session.execute(text("""
+                SELECT id FROM messages
+                WHERE status = 'pending' AND grammar_checked = FALSE
+                LIMIT 50
+            """))).fetchall() or []
+
+        results = []
+        for (msg_id,) in rows:
+            results.append(await self.validate(str(msg_id)))
+        return results
