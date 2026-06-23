@@ -1,6 +1,7 @@
 """FastAPI middleware that writes every API call to compliance_audit_log."""
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from typing import Callable
@@ -11,6 +12,8 @@ from starlette.types import ASGIApp
 
 from shared.db import async_session_factory
 from sqlalchemy import text
+
+log = logging.getLogger(__name__)
 
 
 class ComplianceAuditMiddleware(BaseHTTPMiddleware):
@@ -56,7 +59,7 @@ class ComplianceAuditMiddleware(BaseHTTPMiddleware):
                     },
                 )
                 await session.commit()
-        except Exception:  # noqa: BLE001
-            pass  # never let audit failure break the request
+        except Exception as exc:
+            log.error("Compliance audit log write failed: %s", exc)
 
         return response
