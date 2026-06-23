@@ -54,7 +54,8 @@ CREATE TABLE IF NOT EXISTS publications (
     disease_areas TEXT[],
     biomarkers TEXT[],
     therapies TEXT[],
-    embedding vector(1536),
+    -- voyage-3 outputs 1024-dimensional embeddings
+    embedding vector(1024),
     raw_json JSONB,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -142,11 +143,21 @@ CREATE TABLE IF NOT EXISTS relationship_memory (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Indexes
-CREATE INDEX IF NOT EXISTS idx_hcps_specialty ON hcps(specialty);
-CREATE INDEX IF NOT EXISTS idx_hcps_state ON hcps(state);
+-- Core indexes
+CREATE INDEX IF NOT EXISTS idx_hcps_specialty       ON hcps(specialty);
+CREATE INDEX IF NOT EXISTS idx_hcps_state           ON hcps(state);
 CREATE INDEX IF NOT EXISTS idx_hcps_commercial_score ON hcps(commercial_score DESC);
-CREATE INDEX IF NOT EXISTS idx_publications_pubmed ON publications(pubmed_id);
-CREATE INDEX IF NOT EXISTS idx_trigger_events_hcp ON trigger_events(hcp_id);
+CREATE INDEX IF NOT EXISTS idx_publications_pubmed  ON publications(pubmed_id);
+CREATE INDEX IF NOT EXISTS idx_trigger_events_hcp   ON trigger_events(hcp_id);
 CREATE INDEX IF NOT EXISTS idx_trigger_events_processed ON trigger_events(processed);
-CREATE INDEX IF NOT EXISTS idx_publications_embedding ON publications USING ivfflat (embedding vector_cosine_ops);
+
+-- Additional performance indexes
+CREATE INDEX IF NOT EXISTS idx_hcps_kol_tier           ON hcps(kol_tier);
+CREATE INDEX IF NOT EXISTS idx_publications_published_at ON publications(published_at DESC);
+CREATE INDEX IF NOT EXISTS idx_trigger_events_type_time  ON trigger_events(event_type, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_pub_authors_hcp           ON publication_authors(hcp_id);
+CREATE INDEX IF NOT EXISTS idx_trial_investigators_hcp   ON trial_investigators(hcp_id);
+
+-- Vector similarity index (IVFFlat — requires at least a few hundred rows to be useful)
+CREATE INDEX IF NOT EXISTS idx_publications_embedding ON publications USING ivfflat (embedding vector_cosine_ops)
+    WITH (lists = 100);
