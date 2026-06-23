@@ -12,6 +12,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./infra/postgres/migrations:/docker-entrypoint-initdb.d/migrations
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-oncology}"]
       interval: 10s
@@ -148,6 +149,38 @@ services:
       - ./shared:/app/shared
     command: uvicorn messaging.main:app --host 0.0.0.0 --port 8001
 
+  # Layer 4-7: Research, Publication, Trial, Competitor intelligence
+  intelligence:
+    build:
+      context: .
+      dockerfile: services/intelligence/Dockerfile
+    env_file: .env
+    ports:
+      - '8002:8002'
+    depends_on:
+      postgres: {condition: service_healthy}
+      neo4j: {condition: service_healthy}
+      elasticsearch: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    volumes:
+      - ./shared:/app/shared
+    command: uvicorn services.intelligence.main:app --host 0.0.0.0 --port 8002
+
+  # Layer 18: Analytics & Feedback
+  analytics:
+    build:
+      context: .
+      dockerfile: services/analytics/Dockerfile
+    env_file: .env
+    ports:
+      - '8003:8003'
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    volumes:
+      - ./shared:/app/shared
+    command: uvicorn services.analytics.main:app --host 0.0.0.0 --port 8003
+
   dashboard:
     build: ./services/dashboard
     env_file: .env
@@ -158,9 +191,14 @@ services:
       neo4j: {condition: service_healthy}
       elasticsearch: {condition: service_healthy}
       redis: {condition: service_healthy}
+      intelligence: {condition: service_started}
+      analytics: {condition: service_started}
     volumes:
       - ./shared:/app/shared
       - ./services/scoring:/app/scoring
+    environment:
+      - INTELLIGENCE_SERVICE_URL=http://intelligence:8002
+      - ANALYTICS_SERVICE_URL=http://analytics:8003
 
   frontend:
     build: ./frontend
@@ -168,6 +206,8 @@ services:
       - '3000:3000'
     environment:
       - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NEXT_PUBLIC_INTELLIGENCE_URL=http://localhost:8002
+      - NEXT_PUBLIC_ANALYTICS_URL=http://localhost:8003
     depends_on:
       - dashboard
 
