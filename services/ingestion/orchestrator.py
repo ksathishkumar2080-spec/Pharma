@@ -1,22 +1,22 @@
 """Research API Orchestrator — runs all sources once in dependency order."""
 import asyncio
 import logging
-from ingestion.connectors.pubmed import PubMedConnector
-from ingestion.connectors.semantic_scholar import SemanticScholarConnector
-from ingestion.connectors.openalex import OpenAlexConnector
-from ingestion.connectors.crossref import CrossRefConnector
-from ingestion.connectors.europe_pmc import EuropePMCConnector
-from ingestion.connectors.biorxiv import BioRxivConnector
-from ingestion.connectors.core_api import COREAPIConnector
-from ingestion.connectors.clinical_trials import ClinicalTrialsConnector
-from ingestion.connectors.who_ictrp import WHOICTRPConnector
-from ingestion.connectors.fda_approvals import FDAApprovalsConnector
-from ingestion.connectors.clinvar import ClinVarConnector
-from ingestion.connectors.wiley_tdm import WileyTDMConnector
-from ingestion.connectors.nccn_watcher import NCCNWatcher
-from ingestion.connectors.news import NewsConnector
-from ingestion.connectors.twitter_monitor import TwitterMonitor
-from ingestion.connectors.reddit_monitor import RedditMonitor
+from .connectors.pubmed import PubMedConnector
+from .connectors.semantic_scholar import SemanticScholarConnector
+from .connectors.openalex import OpenAlexConnector
+from .connectors.crossref import CrossRefConnector
+from .connectors.europe_pmc import EuropePMCConnector
+from .connectors.biorxiv import BioRxivConnector
+from .connectors.core_api import COREAPIConnector
+from .connectors.clinical_trials import ClinicalTrialsConnector
+from .connectors.who_ictrp import WHOICTRPConnector
+from .connectors.fda_approvals import FDAApprovalsConnector
+from .connectors.clinvar import ClinVarConnector
+from .connectors.wiley_tdm import WileyTDMConnector
+from .connectors.nccn_watcher import NCCNWatcher
+from .connectors.news import NewsConnector
+from .connectors.twitter_monitor import TwitterMonitor
+from .connectors.reddit_monitor import RedditMonitor
 
 log = logging.getLogger(__name__)
 
@@ -33,7 +33,6 @@ class ResearchAPIOrchestrator:
     async def run_all(self, parallel: bool = True):
         log.info("ResearchAPIOrchestrator: starting full pipeline run")
 
-        # Phase 1: Publication databases (can run in parallel)
         pub_connectors = [
             PubMedConnector(),
             SemanticScholarConnector(),
@@ -44,7 +43,6 @@ class ResearchAPIOrchestrator:
             COREAPIConnector(),
         ]
 
-        # Phase 2: Trial and regulatory
         trial_connectors = [
             ClinicalTrialsConnector(),
             WHOICTRPConnector(),
@@ -53,12 +51,8 @@ class ResearchAPIOrchestrator:
             NCCNWatcher(),
         ]
 
-        # Phase 3: Full text enrichment
-        fulltext_connectors = [
-            WileyTDMConnector(),
-        ]
+        fulltext_connectors = [WileyTDMConnector()]
 
-        # Phase 4: Social / news
         social_connectors = [
             NewsConnector(),
             TwitterMonitor(),
