@@ -1,4 +1,4 @@
-"""Research Intelligence Agent.
+"""Research Intelligence Agent — L5 Research Summarizer.
 
 Synthesizes trends, white spaces, and emerging signals across:
 - PubMed / Semantic Scholar / OpenAlex / Europe PMC / bioRxiv
@@ -6,7 +6,7 @@ Synthesizes trends, white spaces, and emerging signals across:
 - ClinVar biomarkers
 - Clinical trials
 """
-import anthropic
+from anthropic import AsyncAnthropic
 import json
 from shared.config import get_settings
 from shared.db import get_session_factory
@@ -44,22 +44,26 @@ Produce JSON with keys:
 
 class ResearchIntelligenceAgent:
     def __init__(self):
-        settings = get_settings()
-        self.client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        self._settings = get_settings()
+        self.client = AsyncAnthropic(api_key=self._settings.anthropic_api_key)
 
     async def synthesize(self, disease_area: str | None = None) -> dict:
         context = await self._gather_context(disease_area)
         prompt = RESEARCH_SYNTHESIS_PROMPT.format(**context)
 
-        response = self.client.messages.create(
-            model="claude-sonnet-4-6",
+        response = await self.client.messages.create(
+            model=self._settings.anthropic_model_sonnet,
             max_tokens=2048,
             messages=[{"role": "user", "content": prompt}],
         )
         try:
             result = json.loads(response.content[0].text)
         except Exception:
-            result = {"raw": response.content[0].text}
+            stripped = response.content[0].text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+            try:
+                result = json.loads(stripped)
+            except Exception:
+                result = {"raw": response.content[0].text}
         result["disease_area_filter"] = disease_area
         result["publication_count"] = context["pub_count"]
         result["trial_count"] = context["trial_count"]
@@ -67,7 +71,6 @@ class ResearchIntelligenceAgent:
 
     async def _gather_context(self, disease_area: str | None) -> dict:
         factory = get_session_factory()
-        settings = get_settings()
 
         async with factory() as session:
             pub_where = "WHERE p.published_at >= NOW() - INTERVAL '6 months'"
@@ -82,11 +85,11 @@ class ResearchIntelligenceAgent:
                 {pub_where}
                 ORDER BY p.citation_count DESC NULLS LAST
                 LIMIT 20
-            """), params)).fetchall()
+            """), params)).fetchall() or []
 
             pub_count = (await session.execute(text(f"""
                 SELECT COUNT(*) FROM publications p {pub_where}
-            """), params)).scalar()
+            """), params)).scalar() or 0
 
             trials = (await session.execute(text("""
                 SELECT title, phase, sponsor, conditions
@@ -94,26 +97,24 @@ class ResearchIntelligenceAgent:
                 WHERE status = 'RECRUITING'
                 ORDER BY created_at DESC
                 LIMIT 10
-            """))).fetchall()
+            """))).fetchall() or []
 
             trial_count = (await session.execute(text(
                 "SELECT COUNT(*) FROM clinical_trials WHERE status = 'RECRUITING'"
-            ))).scalar()
+            ))).scalar() or 0
 
-        # Top biomarkers from publication data
         biomarker_freq: dict[str, int] = {}
         for pub in pubs:
             for bm in (pub[4] or []):
                 biomarker_freq[bm] = biomarker_freq.get(bm, 0) + 1
-        top_biomarkers = sorted(biomarker_freq, key=biomarker_freq.get, reverse=True)[:10]
+        top_biomarkers = sorted(biomarker_freq, key=lambda k: biomarker_freq[k], reverse=True)[:10]
 
-        # Conference abstracts from Elasticsearch
         abstracts_text = "None indexed yet"
         try:
-            es = AsyncElasticsearch(settings.elasticsearch_url)
+            es = AsyncElasticsearch(self._settings.elasticsearch_url)
             es_result = await es.search(
                 index="conference_abstracts",
-                body={"query": {"match_all": {}}, "size": 5, "sort": [{"_score": "desc"}]},
+                body={"query": {"match_all": {}}, "size": 5},
             )
             abstracts = [h["_source"].get("title", "") for h in es_result["hits"]["hits"]]
             abstracts_text = "\n".join(f"- {a}" for a in abstracts) or "None indexed yet"
@@ -122,12 +123,12 @@ class ResearchIntelligenceAgent:
             pass
 
         return {
-            "pub_count": pub_count or 0,
+            "pub_count": pub_count,
             "publications": "\n".join(
                 f"- {p[0]} ({p[1]}, {p[2]} citations, biomarkers: {p[4]})"
                 for p in pubs
             ) or "None",
-            "trial_count": trial_count or 0,
+            "trial_count": trial_count,
             "trials": "\n".join(
                 f"- {t[0]} | Phase {t[1]} | {t[2]}"
                 for t in trials
@@ -159,7 +160,7 @@ class ResearchIntelligenceAgent:
                 AND p.published_at >= NOW() - INTERVAL '3 years'
                 GROUP BY 1
                 ORDER BY 1
-            """), params)).fetchall()
+            """), params)).fetchall() or []
 
         return {
             "filter": {"biomarker": biomarker, "disease": disease},
