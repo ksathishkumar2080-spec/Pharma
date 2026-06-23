@@ -1,7 +1,7 @@
 """Next Best Action (NBA) Engine — produces prioritized rep action queues."""
 from shared.db import get_session_factory
 from sqlalchemy import text
-import anthropic
+from anthropic import AsyncAnthropic
 from shared.config import get_settings
 import logging
 import json
@@ -23,7 +23,7 @@ HCP Profile:
 - Recent Publications: {publications}
 
 Output JSON with keys:
-  action (string: one of ["send_linkedin", "send_email", "schedule_call", 
+  action (string: one of ["send_linkedin", "send_email", "schedule_call",
           "invite_to_advisory", "share_data", "trial_referral", "no_action"]),
   rationale (string, 1-2 sentences),
   urgency (string: "high" | "medium" | "low"),
@@ -34,7 +34,8 @@ Output JSON with keys:
 class NextBestActionEngine:
     def __init__(self):
         settings = get_settings()
-        self.client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        self.client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+        self.model = settings.anthropic_model_haiku
 
     async def get_actions_for_territory(self, state: str | None = None, limit: int = 50) -> list[dict]:
         factory = get_session_factory()
@@ -51,14 +52,13 @@ class NextBestActionEngine:
                 {where}
                 ORDER BY h.commercial_score DESC
                 LIMIT :limit
-            """), params)).fetchall()
+            """), params)).fetchall() or []
 
         actions = []
         for row in rows:
             action = await self._compute_nba(row)
             actions.append(action)
 
-        # Sort by urgency
         urgency_order = {"high": 0, "medium": 1, "low": 2}
         actions.sort(key=lambda x: urgency_order.get(x.get("urgency", "low"), 2))
         return actions
@@ -70,7 +70,7 @@ class NextBestActionEngine:
             triggers = (await session.execute(text("""
                 SELECT event_type, occurred_at FROM trigger_events
                 WHERE hcp_id = :id ORDER BY occurred_at DESC LIMIT 3
-            """), {"id": hcp_id})).fetchall()
+            """), {"id": hcp_id})).fetchall() or []
 
             last_interaction = (await session.execute(text("""
                 SELECT interaction_type, occurred_at FROM relationship_memory
@@ -81,13 +81,13 @@ class NextBestActionEngine:
                 SELECT ct.title FROM clinical_trials ct
                 JOIN trial_investigators ti ON ct.id = ti.trial_id
                 WHERE ti.hcp_id = :id AND ct.status = 'RECRUITING' LIMIT 2
-            """), {"id": hcp_id})).fetchall()
+            """), {"id": hcp_id})).fetchall() or []
 
             pubs = (await session.execute(text("""
                 SELECT p.title FROM publications p
                 JOIN publication_authors pa ON p.id = pa.publication_id
                 WHERE pa.hcp_id = :id ORDER BY p.published_at DESC LIMIT 3
-            """), {"id": hcp_id})).fetchall()
+            """), {"id": hcp_id})).fetchall() or []
 
         prompt = NBA_PROMPT.format(
             name=name,
@@ -101,12 +101,17 @@ class NextBestActionEngine:
         )
 
         try:
-            response = self.client.messages.create(
-                model="claude-haiku-4-5-20251001",
+            response = await self.client.messages.create(
+                model=self.model,
                 max_tokens=512,
                 messages=[{"role": "user", "content": prompt}],
             )
-            result = json.loads(response.content[0].text)
+            raw = response.content[0].text
+            try:
+                result = json.loads(raw)
+            except json.JSONDecodeError:
+                stripped = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+                result = json.loads(stripped)
             result["hcp_id"] = str(hcp_id)
             result["hcp_name"] = name
             result["commercial_score"] = commercial_score
